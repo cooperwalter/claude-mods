@@ -256,10 +256,6 @@ function parsePlan(markdown: string, now: number): Plan | null {
   return { id: PLAN_ID, title: title || 'Plan', kind: stages.length === 1 ? 'todo' : 'plan', stages, state: 'running', note: null, startedAt: now }
 }
 
-function st(title: string, s: StepStatus): PlanStep {
-  return { title, status: s, substeps: [] }
-}
-
 // ---------- drawing ----------
 
 type Where = { pos: number; total: number; stage: number; step: number; stageSize: number }
@@ -1192,11 +1188,7 @@ async function animate($: EngineInterface) {
 // ---------- engine glue ----------
 
 // the engine's player first (afplay on macOS); PowerShell where it cannot play
-// set while a demo reel records: every sound with its moment, so a video can carry them
-let soundLog: { at: number; name: string }[] | null = null
-
 function play($: EngineInterface, name: 'decision' | 'error' | 'done') {
-  if (soundLog) void $.clock.now().then(at => soundLog?.push({ at, name }))
   const file = `${$.plugin.root}/sounds/${name}.wav`.replace(/\//g, '\\')
   // the path goes in through the environment: written into the command, a quote in it (C:\Users\O'Brien) ends the string
   const viaPowerShell = () =>
@@ -1415,12 +1407,6 @@ const CALLS_BEFORE_NUDGE = 6 // edits without a plan update before a reminder
 
 
 
-// ---------- demo reel: two pipelines and their agents, ~13 s, for screen recordings ----------
-const run = (id: string, title: string, tool: string, at: number, isSonnet: boolean): AgentRun => ({
-  id, title, state: 'running', tool, startedAt: at, endedAt: null, depth: 0,
-  ...(isSonnet ? { model: 'claude-sonnet-5-5', effort: 'medium' } : { model: 'claude-haiku-4-5' }),
-})
-
 // $.state lives as long as the process, so the bars are kept per session in the plugin's store as well
 const SAVED = 'plans:'
 const KEEP_SESSIONS = 20
@@ -1448,88 +1434,6 @@ async function restorePlans($: EngineInterface) {
   if (list.length === 0) return
   await update($, plans, () => list)
   lastSaved = list
-}
-
-async function runReel($: EngineInterface, logPath: string) {
-  const t0 = await $.clock.now()
-  soundLog = []
-  foldUntil = t0 + 20_000
-  await update($, plans, () => [])
-  const A = 'reel-checkout'
-  const B = 'reel-release'
-  const steps = (names: string[], active: number) => names.map((n, i) => st(n, i < active ? 'done' : i === active ? 'active' : 'pending'))
-  // mid-run the checkout plan is rewritten: a Harden stage lands between Build and Verify
-  let isReplanned = false
-  const planA = (k: number, state: PlanState = 'running'): Plan => {
-    const all = isReplanned
-      ? ['Routes', 'Cart store', 'Payment API', 'Webhooks', 'Checkout UI', 'Rate limits', 'Security review', 'Tests', 'Build']
-      : ['Routes', 'Cart store', 'Payment API', 'Webhooks', 'Checkout UI', 'Tests', 'Build']
-    const s2 = steps(all, k)
-    const stages = isReplanned
-      ? [{ name: 'Explore', steps: s2.slice(0, 2) }, { name: 'Build', steps: s2.slice(2, 5) }, { name: 'Harden', steps: s2.slice(5, 7) }, { name: 'Verify', steps: s2.slice(7) }]
-      : [{ name: 'Explore', steps: s2.slice(0, 2) }, { name: 'Build', steps: s2.slice(2, 5) }, { name: 'Verify', steps: s2.slice(5) }]
-    return { id: A, title: 'Checkout flow', kind: 'plan', state, note: null, startedAt: t0, stages }
-  }
-  const planB = (k: number, state: PlanState = 'running'): Plan =>
-    ({ id: B, title: 'Release notes', kind: 'todo', state, note: null, startedAt: t0, stages: [{ name: 'Release', steps: steps(['Collect PRs', 'Group changes', 'Draft notes', 'Publish'], k) }] })
-  const setAgents = async (id: string, f: (a: AgentRun[]) => AgentRun[]) => {
-    const now = await $.clock.now()
-    await update($, plans, list => list.map(p => (p.id === id ? syncAuto({ ...p, agents: f(p.agents ?? []) }, now) : p)))
-  }
-  const edit = (id: string, agentId: string, ch: Partial<AgentRun>, at: number) =>
-    setAgents(id, list => list.map(a => (a.id === agentId ? { ...a, ...ch, ...(ch.state === 'done' || ch.state === 'error' ? { endedAt: at } : {}) } : a)))
-  const keep = async (id: string, f: (p: Plan) => Plan) => {
-    let before: PlanState | undefined
-    let after: PlanState | undefined
-    const now = await $.clock.now()
-    await update($, plans, list =>
-      list.map(p => {
-        if (p.id !== id) return p
-        before = p.state
-        const made = f(p)
-        // a finished bar shows its time in the pill, so it needs the moment it ended
-        const next = { ...made, endedAt: made.state === 'done' ? now : null, agents: p.agents, agentsDoneAt: p.agentsDoneAt }
-        after = next.state
-        return next
-      }),
-    )
-    if (after) chime($, before, after)
-  }
-
-  // agent events: [ms, bar, agent id, title or change]
-  type Ev = [number, string, string, string | Partial<AgentRun>]
-  const ev: Ev[] = [
-    [0, A, 'a1', 'Map payment routes'], [0, A, 'a2', 'Read cart store'], [0, A, 'a3', 'Scan checkout tests'], [0, A, 'a4', 'Trace tax rules'],
-    [0, A, 'a5', 'List webhooks'], [300, B, 'b1', 'Collect merged PRs'], [300, B, 'b2', 'Group by area'], [300, B, 'b3', 'Find breaking changes'],
-    [300, B, 'b4', 'Check migrations'], [900, A, 'a1', { tool: 'Read' }], [1100, B, 'b1', { tool: 'Bash' }], [1500, A, 'a2', { state: 'done' }],
-    [2000, B, 'b2', { tool: 'Grep' }], [2200, A, 'a4', { tool: 'Grep' }], [2400, B, 'b1', { state: 'done' }],
-    [2800, A, 'a1', { state: 'done' }], [3200, B, 'b3', { tool: 'Read' }],
-    [3500, A, 'a3', { state: 'waiting', tool: 'Needs approval' }], [4100, B, 'b2', { state: 'done' }],
-    [4400, A, 'a5', { state: 'done' }], [4700, B, 'b4', { state: 'done' }], [5000, A, 'a3', { state: 'running', tool: 'Bash' }],
-    [5600, B, 'b5', 'Draft release notes'], [6000, A, 'a3', { state: 'error' }], [6600, B, 'b3', { state: 'done' }], [7000, A, 'a6', 'Fix webhook retry'], [7600, A, 'a4', { state: 'done' }],
-    [8000, B, 'b5', { tool: 'Write' }], [8400, A, 'a6', { tool: 'Bash' }], [9000, B, 'b5', { state: 'done' }], [10200, A, 'a6', { state: 'done' }],
-  ]
-  const script: [number, () => Promise<unknown>][] = [
-    [0, async () => {
-      await putPlan($, planA(0))
-      await putPlan($, planB(0))
-    }],
-    ...ev.map(([at, bar, id, x]): [number, () => Promise<unknown>] => [
-      at,
-      () => (typeof x === 'string' ? setAgents(bar, list => [...list, run(id, x, ['Glob', 'Read', 'Grep'][list.length % 3] ?? 'Read', t0 + at, list.length % 3 === 1)]) : edit(bar, id, x, t0 + at)),
-    ]),
-    [1600, () => keep(A, () => planA(1))], [2500, () => keep(B, () => planB(1))], [3500, () => keep(A, p => ({ ...planA(2), state: 'needs_input', note: 'Run payment tests?' }))],
-    [5000, () => keep(A, () => planA(3))], [5700, () => keep(B, () => planB(2))],
-    [6000, () => keep(A, () => ({ ...planA(5), state: 'error', note: '2 tests failed' }))],
-    [7000, () => keep(A, () => { isReplanned = true; return planA(5) })], [8200, () => keep(B, () => planB(3))],
-    [8800, () => keep(A, () => planA(7))],
-    [9100, () => keep(B, () => planB(4, 'done'))], [10400, () => keep(A, () => planA(9, 'done'))],
-    [13500, async () => {
-      await $.fs.write(logPath, JSON.stringify({ t0, sounds: soundLog }))
-      soundLog = null
-    }],
-  ]
-  for (const [at, step] of script) $.clock.after(at, () => void step())
 }
 
 export const register: Register = (on, options) => {
@@ -1718,10 +1622,6 @@ export const register: Register = (on, options) => {
     const raw = e as unknown as Raw
     const now = await $.clock.now()
     const id = slug(str(raw.id, 60) || str(raw.title, 80))
-    if (id === 'reel' && typeof raw.note === 'string') {
-      await runReel($, raw.note)
-      return { result: 'reel started' }
-    }
     const next = await editPlan(
       $,
       id,
